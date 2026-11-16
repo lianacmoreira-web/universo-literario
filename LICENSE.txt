@@ -1,0 +1,1 @@
+Este projeto foi preparado para uso acadêmico e demonstração. Você pode modificar e publicar os arquivos. Serviços externos (Netlify e OpenAI) seguem seus próprios termos e políticas.

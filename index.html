@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f0e8">
+  <meta name="description" content="Uma biblioteca de referência para explorar o universo literário de um autor.">
+  <title>Literary Universe — Reference Library</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Literary Universe início">
+      <span class="brand-mark">L<span>U</span></span>
+      <span class="brand-name">LITERARY UNIVERSE<small>REFERENCE LIBRARY</small></span>
+    </a>
+    <a class="top-link" href="#sobre">Sobre o projeto <span>↗</span></a>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow"><span></span> UMA CARTOGRAFIA DE LEITURAS</p>
+        <h1>Entre na biblioteca<br>de um <em>escritor.</em></h1>
+        <p class="intro">Livros, diálogos e afinidades que ajudam a revelar o universo literário, intelectual e estético por trás de uma obra.</p>
+        <form id="search-form" class="search-form">
+          <label for="author">Qual autor você gostaria de investigar?</label>
+          <div class="search-row">
+            <input id="author" name="author" type="text" placeholder="Ex.: Ana Cristina Cesar" maxlength="120" required>
+            <button id="submit-btn" type="submit">Construir biblioteca <span>→</span></button>
+          </div>
+          <p class="search-note">Pesquisa baseada em fontes. Até 10 livros. Nenhuma influência é presumida sem evidência.</p>
+        </form>
+      </div>
+      <aside class="hero-aside">
+        <div class="book-stack" aria-hidden="true">
+          <div class="book book-one"><span>LEITURAS<br>ESSENCIAIS</span><i>01</i></div>
+          <div class="book book-two"><span>MAPAS<br>DE LEITURA</span><i>02</i></div>
+          <div class="book book-three"><span>DIÁLOGOS<br>LITERÁRIOS</span><i>03</i></div>
+        </div>
+        <p class="aside-caption">“Ler é estabelecer<br>relações invisíveis.”</p>
+        <span class="aside-rule"></span>
+        <span class="aside-index">VOL. 01 &nbsp; / &nbsp; OPEN LIBRARY</span>
+      </aside>
+    </section>
+
+    <section id="result-section" class="result-section hidden" aria-live="polite">
+      <div id="loading" class="loading hidden">
+        <div class="loader"></div>
+        <p class="eyebrow">PESQUISA EM ANDAMENTO</p>
+        <h2>Reconstruindo um universo de leituras.</h2>
+        <p>Consultando fontes e organizando relações literárias. Isso pode levar um minuto.</p>
+      </div>
+      <div id="error" class="error-box hidden"></div>
+      <div id="results" class="hidden"></div>
+    </section>
+
+    <section id="sobre" class="about">
+      <div class="section-kicker">01 / A PROPOSTA</div>
+      <div>
+        <h2>Mais do que uma lista.<br><em>Um mapa de leitura.</em></h2>
+        <p>A biblioteca não pretende determinar influências. Ela distingue o que o escritor declarou, o que está documentado em sua obra e o que a crítica aproxima por afinidade. Cada escolha deve abrir uma nova possibilidade de leitura.</p>
+      </div>
+      <div class="about-stamp">READ<br>DEEPER</div>
+    </section>
+
+    <section class="method">
+      <p class="eyebrow">02 / COMO FUNCIONA</p>
+      <div class="method-grid">
+        <article><span>01</span><h3>Escuta</h3><p>Preferências e recomendações declaradas pelo próprio autor têm prioridade.</p></article>
+        <article><span>02</span><h3>Evidência</h3><p>Entrevistas, ensaios, textos e estudos sustentam as relações apresentadas.</p></article>
+        <article><span>03</span><h3>Curadoria</h3><p>Até dez livros, escolhidos pela qualidade e diversidade das conexões.</p></article>
+        <article><span>04</span><h3>Percurso</h3><p>Uma sequência de leitura para aprofundar a compreensão da obra.</p></article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <a class="brand footer-brand" href="/"><span class="brand-mark">L<span>U</span></span><span class="brand-name">LITERARY UNIVERSE<small>REFERENCE LIBRARY</small></span></a>
+    <p>Um projeto de pesquisa e curadoria literária.</p>
+    <span>© 2026 · EDIÇÃO ACADÊMICA</span>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>
