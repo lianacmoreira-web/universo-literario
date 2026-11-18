@@ -1,80 +1,73 @@
+
 const SYSTEM_PROMPT = `
-Você é o Literary Universe — Reference Library, pesquisador e curador literário.
+Você é o Literary Universe — Reference Library, versão acadêmica 2.0.
+Sua missão é recomendar ATÉ 10 LIVROS EXCLUSIVAMENTE DE OUTROS AUTORES para compreender o universo literário, intelectual, estético, histórico e intertextual do escritor solicitado.
 
-Crie uma biblioteca de até 10 livros para compreender o universo literário, intelectual, estético, temático, histórico e intertextual de um escritor.
+REGRAS OBRIGATÓRIAS:
+- NÃO inclua livros do escritor pesquisado, nem livros em coautoria com ele, na lista principal. Obras dele podem ser citadas apenas nas explicações.
+- Não confunda registros de catálogo, semelhanças temáticas ou metadados acadêmicos com evidência de leitura, admiração, preferência ou influência.
+- Não invente títulos, citações, entrevistas, relações ou links.
+- Classifique como "preferência declarada" ou "referência documentada" SOMENTE se houver prova explícita no dossiê. Na dúvida, use "afinidade crítica" ou "contexto literário" e explique que a relação é curatorial.
+- Separe a evidência sobre o AUTOR recomendado da evidência sobre o LIVRO específico. Uma referência a Nietzsche, por exemplo, não comprova a leitura de Genealogia da moral.
+- Selecione menos de 10 livros quando necessário; verifique com cautela autores e títulos.
+- Utilize somente URLs fornecidas no dossiê. Deixe source_url vazio quando nenhuma fonte comprovar a relação. Não atribua à fonte o que ela não demonstra.
+- A versão gratuita não realiza busca web em tempo real; declare essa limitação.
+- Responda em português brasileiro. Retorne SOMENTE JSON válido.
 
-REGRAS:
-- Utilize o dossiê fornecido pelo servidor.
-- Não invente livros, entrevistas, fontes, preferências ou influências.
-- Metadados bibliográficos não comprovam influência literária.
-- Diferencie rigorosamente:
-  "preferência declarada",
-  "referência documentada",
-  "afinidade crítica",
-  "contexto literário".
-- Use "preferência declarada" apenas com evidência explícita.
-- Se as fontes forem insuficientes, selecione menos livros.
-- Não invente URLs.
-- Responda em português brasileiro.
-- Retorne somente JSON válido.
-
-FORMATO:
+FORMATO (preserve todos os campos):
 {
-  "author": "Nome do autor",
-  "title": "Biblioteca de referência",
-  "introduction": "Apresentação da seleção",
+  "author": "Nome pesquisado",
+  "title": "Biblioteca de referência — Nome",
+  "introduction": "Introdução e limites",
   "books": [
     {
-      "author": "Autor do livro",
-      "title": "Título do livro",
+      "author": "Outro autor",
+      "title": "Livro",
       "evidence_type": "contexto literário",
       "role": "Função na biblioteca",
-      "connection": "Relação com o escritor",
+      "connection": "Conexão e seus limites",
       "reading_value": "O que observar",
+      "related_work": "Obra do escritor pesquisado relacionada, se pertinente",
+      "author_evidence": "O que está comprovado sobre a relação com o autor recomendado, ou não documentado",
+      "book_evidence": "O que está comprovado sobre o livro específico, ou escolha curatorial",
+      "evidence_note": "Distinção entre prova e interpretação",
       "source_url": ""
     }
   ],
-  "reading_path": "Percurso de leitura",
+  "reading_path": "Percurso sugerido",
   "sources": [
     {
       "title": "Fonte",
-      "url": "URL",
-      "description": "O que a fonte comprova"
+      "url": "URL exata do dossiê",
+      "description": "O que sustenta de fato"
     }
   ],
-  "method_note": "Limitações da pesquisa"
+  "method_note": "Fontes, limites e critérios"
 }
 `;
 
-const jsonHeaders = {
-  "Content-Type": "application/json; charset=utf-8"
-};
-
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
+const json = (data, status = 200) =>
+  Response.json(data, {
     status,
-    headers: jsonHeaders
+    headers: { "Cache-Control": "no-store" }
   });
-}
 
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+const delay = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 async function safeJson(url) {
   try {
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(4500),
-      headers: {
-        Accept: "application/json"
-      }
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(4500)
     });
 
-    if (!response.ok) return null;
-
-    const type = response.headers.get("content-type") || "";
-
-    if (!type.includes("json")) return null;
+    if (
+      !response.ok ||
+      !(response.headers.get("content-type") || "").includes("json")
+    ) {
+      return null;
+    }
 
     return await response.json();
   } catch {
@@ -87,30 +80,33 @@ async function buildDossier(author) {
 
   const [wiki, books, works] = await Promise.all([
     safeJson(
-      `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrlimit=3&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json`
+      `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrlimit=4&prop=extracts|info&exintro=1&explaintext=1&inprop=url&format=json`
     ),
 
     safeJson(
-      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent("inauthor:" + author)}&maxResults=6`
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`inauthor:${author}`)}&maxResults=7&printType=books`
     ),
 
     safeJson(
-      `https://api.openalex.org/works?search=${q}&per-page=6&select=id,doi,title,publication_year,authorships,primary_location`
+      `https://api.openalex.org/works?search=${q}&per-page=6&select=id,doi,title,publication_year,authorships,abstract_inverted_index,primary_location`
     )
   ]);
 
   const sources = [];
 
   for (const page of Object.values(wiki?.query?.pages || {})) {
-    if (!page.extract) continue;
-
-    sources.push({
-      type: "context_page",
-      title: page.title,
-      url: page.fullurl ||
-        `https://en.wikipedia.org/wiki/${encodeURIComponent(page.title.replaceAll(" ", "_"))}`,
-      excerpt: page.extract.slice(0, 1800)
-    });
+    if (page.extract) {
+      sources.push({
+        type: "context_page",
+        title: page.title,
+        url:
+          page.fullurl ||
+          `https://en.wikipedia.org/wiki/${encodeURIComponent(
+            page.title.replaceAll(" ", "_")
+          )}`,
+        excerpt: page.extract.slice(0, 1600)
+      });
+    }
   }
 
   for (const item of books?.items || []) {
@@ -120,167 +116,146 @@ async function buildDossier(author) {
       type: "book_catalog_record",
       title: info.title || "Sem título",
       authors: info.authors || [],
-      description: (info.description || "").slice(0, 600),
-      url: info.infoLink ||
-        `https://books.google.com/books?id=${encodeURIComponent(item.id)}`
+      description: (info.description || "").slice(0, 500),
+      url:
+        info.infoLink ||
+        `https://books.google.com/books?id=${encodeURIComponent(
+          item.id || ""
+        )}`
     });
   }
 
   for (const work of works?.results || []) {
+    const words = [];
+
+    for (const [word, positions] of Object.entries(
+      work.abstract_inverted_index || {}
+    )) {
+      for (const pos of positions) {
+        if (pos < 250) words[pos] = word;
+      }
+    }
+
     sources.push({
       type: "academic_metadata",
       title: work.title || "Sem título",
-      year: work.publication_year || "",
-      url: work.doi ||
+      authors: (work.authorships || [])
+        .map(a => a.author?.display_name)
+        .filter(Boolean),
+      abstract: words.join(" ").slice(0, 900),
+      url:
+        work.doi ||
         work.primary_location?.landing_page_url ||
         work.id
     });
   }
 
-  return sources.slice(0, 15);
+  return sources.slice(0, 17);
 }
 
-async function callGemini(apiKey, model, prompt) {
+async function callGemini(model, apiKey, prompt) {
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
-  const requestBody = {
-    systemInstruction: {
-      parts: [{ text: SYSTEM_PROMPT }]
-    },
-    contents: [{
-      role: "user",
-      parts: [{ text: prompt }]
-    }],
-    generationConfig: {
-      responseMimeType: "application/json",
-      temperature: 0.25,
-      maxOutputTokens: 5000
-    }
-  };
-
-  let lastError = "O serviço Gemini não respondeu.";
-
   for (let attempt = 0; attempt < 2; attempt++) {
+    let response;
+
     try {
-      const response = await fetch(url, {
+      response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-goog-api-key": apiKey
         },
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(12000)
-      });
-
-      const contentType =
-        response.headers.get("content-type") || "";
-
-      const responseText = await response.text();
-
-      if (!contentType.includes("json")) {
-        throw new Error(
-          "O serviço de IA retornou uma resposta inesperada."
-        );
-      }
-
-      let data;
-
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        throw new Error(
-          "Não foi possível interpretar a resposta do Gemini."
-        );
-      }
-
-      if (!response.ok) {
-        const detail =
-          data?.error?.message || "Erro desconhecido.";
-
-        if ([429, 500, 502, 503, 504].includes(response.status)) {
-          lastError = `Gemini temporariamente indisponível: ${detail}`;
-
-          if (attempt === 0) {
-            await wait(1000);
-            continue;
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: SYSTEM_PROMPT }]
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }]
+            }
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.2,
+            maxOutputTokens: 3500
           }
-        }
-
-        if (response.status === 404) {
-          throw new Error(
-            `Modelo Gemini não encontrado: ${model}. Verifique GEMINI_MODEL na Netlify.`
-          );
-        }
-
-        if ([400, 401, 403].includes(response.status)) {
-          throw new Error(
-            `Erro de configuração ou acesso ao Gemini: ${detail}`
-          );
-        }
-
-        throw new Error(lastError ===
-          "O serviço Gemini não respondeu."
-          ? detail
-          : lastError
-        );
-      }
-
-      const text = data?.candidates?.[0]?.content?.parts
-        ?.map(part => part.text || "")
-        .join("")
-        .trim();
-
-      if (!text) {
-        throw new Error(
-          "O Gemini retornou uma resposta vazia."
-        );
-      }
-
-      try {
-        return JSON.parse(text);
-      } catch {
-        throw new Error(
-          "O Gemini não retornou uma biblioteca em JSON válido."
-        );
-      }
-
+        }),
+        signal: AbortSignal.timeout(11000)
+      });
     } catch (error) {
-      lastError = error.message || "Erro desconhecido.";
-
-      if (error.name === "TimeoutError" ||
-          error.name === "AbortError") {
-        lastError = "O Gemini demorou demais para responder.";
-
-        if (attempt === 0) {
-          await wait(1000);
-          continue;
-        }
+      if (attempt === 0) {
+        await delay(400);
+        continue;
       }
 
-      throw new Error(lastError);
+      throw new Error("TIMEOUT");
     }
+
+    const type =
+      response.headers.get("content-type") || "";
+
+    if (!type.includes("json")) {
+      throw new Error(
+        `UPSTREAM_HTML_${response.status}`
+      );
+    }
+
+    let data;
+
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error("UPSTREAM_INVALID_JSON");
+    }
+
+    if (!response.ok) {
+      const detail =
+        data?.error?.message || "Falha na API Gemini";
+
+      if (
+        [429, 500, 502, 503, 504].includes(response.status) &&
+        attempt === 0
+      ) {
+        await delay(700);
+        continue;
+      }
+
+      const err = new Error(detail);
+      err.httpStatus = response.status;
+      throw err;
+    }
+
+    return data;
   }
 
-  throw new Error(lastError);
+  throw new Error(
+    "Serviço temporariamente indisponível"
+  );
 }
 
-export default async function handler(req) {
+export default async (req) => {
   if (req.method !== "POST") {
-    return jsonResponse(
-      { error: "Método não permitido. Use POST." },
+    return json(
+      { error: "Use POST para pesquisar um autor." },
       405
     );
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
-
-  const model =
-    process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+  const model = (process.env.GEMINI_MODEL || "").trim();
 
   if (!apiKey) {
-    return jsonResponse({
-      error: "A chave Gemini não está configurada na Netlify."
+    return json({
+      error: "GEMINI_API_KEY não configurada na Netlify."
+    }, 503);
+  }
+
+  if (!model) {
+    return json({
+      error: "GEMINI_MODEL não configurado na Netlify."
     }, 503);
   }
 
@@ -289,18 +264,19 @@ export default async function handler(req) {
   try {
     body = await req.json();
   } catch {
-    return jsonResponse({
+    return json({
       error: "Pedido inválido."
     }, 400);
   }
 
-  const author = String(body?.author || "")
-    .trim()
-    .slice(0, 120);
+  const author =
+    typeof body?.author === "string"
+      ? body.author.trim().slice(0, 120)
+      : "";
 
   if (!author) {
-    return jsonResponse({
-      error: "Informe o nome de um escritor."
+    return json({
+      error: "Informe o nome de um autor."
     }, 400);
   }
 
@@ -308,28 +284,105 @@ export default async function handler(req) {
     const dossier = await buildDossier(author);
 
     const prompt = `
-AUTOR SOLICITADO:
-${author}
+AUTOR SOLICITADO: ${author}
 
 DOSSIÊ DE FONTES ABERTAS:
 ${JSON.stringify(dossier)}
 
-Crie uma biblioteca de referência com até 10 livros.
+Recomende exclusivamente livros de OUTROS autores.
 
-Use somente URLs presentes no dossiê.
-Não confunda catálogo bibliográfico com prova de influência.
-Se não houver evidência suficiente, explicite os limites.
+Não inclua obras do próprio escritor nem coautorias.
+
+Os registros de catálogo listam principalmente obras
+do autor pesquisado e NÃO devem ser recomendados:
+servem apenas como contexto.
+
+Não trate catálogo como prova de influência.
+Não invente fontes.
+
+Separe author_evidence de book_evidence.
+
+Use até 10 livros, preferindo menos quando
+não houver evidência.
 `;
 
-    const result = await callGemini(
-      apiKey,
+    const raw = await callGemini(
       model,
+      apiKey,
       prompt
     );
 
+    const outputText =
+      raw?.candidates?.[0]?.content?.parts
+        ?.map(p => p.text || "")
+        .join("\n")
+        .trim();
+
+    if (!outputText) {
+      return json({
+        error:
+          "O Gemini não retornou conteúdo. Tente novamente."
+      }, 502);
+    }
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(outputText);
+    } catch {
+      return json({
+        error:
+          "O Gemini retornou JSON incompleto. Tente novamente."
+      }, 502);
+    }
+
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return json({
+        error: "Formato de resposta inesperado."
+      }, 502);
+    }
+
     const allowedUrls = new Set(
-      dossier.map(item => item.url).filter(Boolean)
+      dossier.map(s => s.url).filter(Boolean)
     );
+
+    const normalize = (value) =>
+      String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const targetName = normalize(author);
+
+    const targetParts =
+      targetName.split(" ").filter(Boolean);
+
+    const isTargetAuthor = (name) => {
+      const n = normalize(name);
+
+      if (!n) return false;
+
+      if (
+        n === targetName ||
+        n.includes(targetName)
+      ) {
+        return true;
+      }
+
+      const parts = n.split(" ");
+
+      return (
+        targetParts.length >= 2 &&
+        targetParts.every(part => parts.includes(part))
+      );
+    };
 
     const allowedTypes = new Set([
       "preferência declarada",
@@ -338,36 +391,115 @@ Se não houver evidência suficiente, explicite os limites.
       "contexto literário"
     ]);
 
-    result.books = Array.isArray(result.books)
-      ? result.books.slice(0, 10).map(book => ({
-          ...book,
-          evidence_type: allowedTypes.has(book.evidence_type)
-            ? book.evidence_type
-            : "contexto literário",
-          source_url: allowedUrls.has(book.source_url)
-            ? book.source_url
-            : ""
-        }))
+    parsed.books = Array.isArray(parsed.books)
+      ? parsed.books
+          .filter(
+            book =>
+              book &&
+              typeof book === "object" &&
+              typeof book.title === "string" &&
+              typeof book.author === "string"
+          )
+          .filter(
+            book =>
+              !String(book.author)
+                .split(/[,;]|\s+e\s+|\s+and\s+/i)
+                .some(isTargetAuthor)
+          )
+          .slice(0, 10)
+          .map(book => ({
+            ...book,
+            evidence_type:
+              allowedTypes.has(book.evidence_type)
+                ? book.evidence_type
+                : "contexto literário",
+            related_work: String(
+              book.related_work || ""
+            ),
+            author_evidence: String(
+              book.author_evidence ||
+              "Não documentado no dossiê."
+            ),
+            book_evidence: String(
+              book.book_evidence ||
+              "Título escolhido pela curadoria; leitura específica não comprovada."
+            ),
+            evidence_note: String(
+              book.evidence_note ||
+              "Relação sujeita aos limites do dossiê."
+            ),
+            source_url:
+              allowedUrls.has(book.source_url)
+                ? book.source_url
+                : ""
+          }))
       : [];
 
-    result.sources = Array.isArray(result.sources)
-      ? result.sources
-          .filter(source => allowedUrls.has(source.url))
-          .slice(0, 15)
+    parsed.sources = Array.isArray(parsed.sources)
+      ? parsed.sources
+          .filter(s => allowedUrls.has(s?.url))
+          .slice(0, 17)
       : [];
 
-    return jsonResponse(result);
+    return json(parsed);
 
   } catch (error) {
-    console.error(
-      "Literary Universe:",
-      error.message
-    );
+    if (error.message === "TIMEOUT") {
+      return json({
+        error:
+          "A resposta do Gemini demorou demais. Aguarde um pouco e tente novamente."
+      }, 504);
+    }
 
-    return jsonResponse({
+    if (
+      error.message.startsWith("UPSTREAM_HTML_") ||
+      error.message === "UPSTREAM_INVALID_JSON"
+    ) {
+      return json({
+        error:
+          "O serviço Gemini devolveu uma resposta inesperada. Tente novamente mais tarde."
+      }, 502);
+    }
+
+    if (error.httpStatus === 429) {
+      return json({
+        error:
+          "O limite gratuito do Gemini foi atingido. Aguarde antes de tentar novamente."
+      }, 429);
+    }
+
+    if (
+      [500, 502, 503, 504].includes(
+        error.httpStatus
+      )
+    ) {
+      return json({
+        error:
+          "O Gemini está temporariamente indisponível. Aguarde alguns minutos e tente novamente."
+      }, 503);
+    }
+
+    if (
+      [400, 404].includes(error.httpStatus)
+    ) {
+      return json({
+        error:
+          `O modelo configurado (${model}) não foi aceito pela API Gemini. Verifique GEMINI_MODEL no Google AI Studio.`
+      }, 502);
+    }
+
+    if (
+      [401, 403].includes(error.httpStatus)
+    ) {
+      return json({
+        error:
+          "A API Gemini recusou a autenticação ou o acesso. Verifique a chave e as permissões no Google AI Studio."
+      }, 502);
+    }
+
+    return json({
       error:
-        error.message ||
-        "Não foi possível concluir a pesquisa."
-    }, 502);
+        "Falha ao gerar a biblioteca. Tente novamente ou verifique a configuração do Gemini."
+    }, 500);
   }
-}
+};
