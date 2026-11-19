@@ -1,35 +1,69 @@
 
-const form = document.querySelector("#search-form");
-const authorInput = document.querySelector("#author");
-const resultSection = document.querySelector("#result-section");
-const loading = document.querySelector("#loading");
-const errorBox = document.querySelector("#error");
-const results = document.querySelector("#results");
-const submitBtn = document.querySelector("#submit-btn");
+/*
+ * LITERARY UNIVERSE 4.0
+ * GENEALOGIAS POÉTICAS
+ *
+ * Netlify Function
+ *
+ * Objetivo:
+ * Construir genealogias de leitura para poetas.
+ *
+ * Duas listas:
+ * 1. reference_books: relações documentadas
+ * 2. literary_connections: genealogia interpretativa
+ *
+ * Serviços:
+ * - Gemini
+ * - Open Library
+ * - Google Books
+ *
+ * Não exige bibliotecas npm adicionais.
+ */
 
-const evidenceLabels = {
-  "preferência declarada": "Preferência declarada",
-  "influência documentada": "Influência documentada",
-  "referência documentada": "Referência documentada",
-  "afinidade interpretativa": "Afinidade interpretativa",
-  "afinidade crítica": "Afinidade crítica",
-  "contexto literário": "Contexto literário"
-};
+const VERSION = "4.0";
 
-function esc(value = "") {
-  return String(value).replace(/[&<>"']/g, c => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  }[c]));
+const GEMINI_ENDPOINT =
+  "https://generativelanguage.googleapis.com/v1beta/models";
+
+const MAX_CONNECTIONS = 10;
+const MAX_DOCUMENTED = 10;
+
+const sleep = ms =>
+  new Promise(resolve => setTimeout(resolve, ms));
+
+function clean(value, max = 2000) {
+  return String(value ?? "").trim().slice(0, max);
+}
+
+function normalize(value) {
+  return clean(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function words(value) {
+  return normalize(value)
+    .split(" ")
+    .filter(word => word.length > 2);
+}
+
+function response(data, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store"
+    }
+  });
 }
 
 function validUrl(value) {
   try {
     const url = new URL(value);
-    return ["https:", "http:"].includes(url.protocol)
+
+    return url.protocol === "https:"
       ? url.href
       : null;
   } catch {
@@ -37,453 +71,902 @@ function validUrl(value) {
   }
 }
 
-function showError(message) {
-  loading.classList.add("hidden");
-  results.classList.add("hidden");
-  errorBox.textContent = message;
-  errorBox.classList.remove("hidden");
-}
+function sameWriter(a, b) {
+  const first = words(a);
+  const second = words(b);
 
-function displayValue(value) {
-  return value === null ||
-    value === undefined ||
-    String(value).trim() === ""
-      ? null
-      : String(value).trim();
-}
-
-function renderCover(book) {
-  const cover = validUrl(book.cover_url);
-
-  if (!cover) {
-    return `
-      <div class="lu-cover-placeholder" aria-label="Capa não disponível">
-        <span>LU</span>
-        <small>CAPA NÃO DISPONÍVEL</small>
-      </div>
-    `;
+  if (!first.length || !second.length) {
+    return false;
   }
 
-  return `
-    <div class="lu-cover-frame">
-      <img
-        src="${esc(cover)}"
-        alt="Capa catalogada de ${esc(book.title || "livro")}"
-        loading="lazy"
-        referrerpolicy="no-referrer"
-        onerror="this.style.display='none';this.parentElement.classList.add('lu-cover-missing')"
-      >
-    </div>
-  `;
+  return (
+    first.every(word => second.includes(word)) ||
+    second.every(word => first.includes(word))
+  );
 }
 
-function renderMetadata(book) {
-  const items = [];
+function uniqueBooks(items) {
+  const seen = new Set();
 
-  if (displayValue(book.first_publication_year)) {
-    items.push(
-      `<span><strong>Primeira publicação:</strong> ${esc(book.first_publication_year)}</span>`
-    );
-  }
+  return items.filter(book => {
+    const key =
+      normalize(book.author) + "|" +
+      normalize(book.title);
 
-  if (displayValue(book.publisher)) {
-    items.push(
-      `<span><strong>Editora catalogada:</strong> ${esc(book.publisher)}</span>`
-    );
-  }
+    if (!normalize(book.author) ||
+        !normalize(book.title) ||
+        seen.has(key)) {
+      return false;
+    }
 
-  if (displayValue(book.edition)) {
-    items.push(
-      `<span><strong>Edição:</strong> ${esc(book.edition)}</span>`
-    );
-  }
-
-  if (displayValue(book.genre)) {
-    items.push(
-      `<span><strong>Gênero / assunto:</strong> ${esc(book.genre)}</span>`
-    );
-  }
-
-  if (!items.length) return "";
-
-  return `
-    <div class="lu-book-metadata">
-      ${items.join("")}
-    </div>
-  `;
+    seen.add(key);
+    return true;
+  });
 }
 
-function renderBibliographicLink(book) {
-  const url = validUrl(book.bibliographic_source_url);
+async function getJson(url, timeout = 4000) {
+  try {
+    const result = await fetch(url, {
+      headers: {
+        Accept: "application/json"
+      },
+      signal: AbortSignal.timeout(timeout)
+    });
 
-  if (!url) return "";
+    if (!result.ok) return null;
 
-  return `
-    <p class="lu-source-link">
-      <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">
-        Consultar registro bibliográfico ↗
-      </a>
-    </p>
-  `;
+    return await result.json();
+  } catch {
+    return null;
+  }
 }
 
-function renderDocumentedBook(book, index) {
-  const relationship = String(
-    book.relationship || book.evidence_type || ""
-  ).toLowerCase();
+/*
+ * CONTEXTO LITERÁRIO
+ *
+ * Recupera informações básicas do poeta.
+ * Essas fontes NÃO comprovam influências.
+ */
 
-  const label = evidenceLabels[relationship] ||
-    "Relação documental";
+async function getPoetContext(author) {
+  const query = encodeURIComponent(author);
 
-  const evidenceUrl = validUrl(
-    book.evidence_source_url || book.source_url
+  const url =
+    "https://pt.wikipedia.org/w/api.php" +
+    "?action=query" +
+    "&generator=search" +
+    "&gsrsearch=" + query +
+    "&gsrlimit=3" +
+    "&prop=extracts" +
+    "&exintro=1" +
+    "&explaintext=1" +
+    "&format=json";
+
+  const data = await getJson(url);
+
+  const pages = Object.values(
+    data?.query?.pages || {}
   );
 
-  const synopsis = displayValue(book.synopsis);
+  const lastName = words(author).at(-1);
 
-  return `
-    <article class="book-entry lu-book-entry">
-      <span class="number">
-        ${String(index + 1).padStart(2, "0")} /
-        ${esc(label)}
-      </span>
-
-      <div class="lu-book-layout">
-        ${renderCover(book)}
-
-        <div class="lu-book-content">
-          <h3>
-            ${esc(book.author || "Autor não informado")}
-            —
-            <span>${esc(book.title || "Título não informado")}</span>
-          </h3>
-
-          <span class="evidence">${esc(label)}</span>
-
-          ${renderMetadata(book)}
-
-          ${synopsis ? `
-            <p><strong>Sinopse:</strong> ${esc(synopsis)}</p>
-          ` : ""}
-
-          ${displayValue(book.evidence_note) ? `
-            <p>
-              <strong>Relação documentada:</strong>
-              ${esc(book.evidence_note)}
-            </p>
-          ` : ""}
-
-          ${evidenceUrl ? `
-            <p class="lu-source-link">
-              <a href="${esc(evidenceUrl)}"
-                 target="_blank"
-                 rel="noopener noreferrer">
-                Consultar fonte documental ↗
-              </a>
-            </p>
-          ` : ""}
-
-          ${renderBibliographicLink(book)}
-        </div>
-      </div>
-    </article>
-  `;
+  return pages
+    .filter(page => {
+      return page.extract &&
+        words(page.title).includes(lastName);
+    })
+    .map(page => ({
+      title: clean(page.title, 150),
+      excerpt: clean(page.extract, 1600)
+    }))
+    .slice(0, 2);
 }
 
-function renderConnection(book, index) {
-  const label = evidenceLabels[
-    String(book.evidence_type || "").toLowerCase()
-  ] || "Afinidade interpretativa";
+/*
+ * INSTRUÇÕES DE CURADORIA
+ *
+ * O objetivo não é reunir associações genéricas.
+ * É construir uma genealogia poética.
+ */
 
-  const relatedWork = displayValue(book.related_work);
+const SYSTEM_PROMPT = `
+Você é um pesquisador de poesia, crítico literário
+e curador de bibliotecas poéticas.
 
-  return `
-    <article class="book-entry lu-book-entry">
-      <span class="number">
-        ${String(index + 1).padStart(2, "0")} /
-        ${esc(label)}
-      </span>
+Sua especialidade é construir GENEALOGIAS POÉTICAS.
 
-      <div class="lu-book-layout">
-        ${renderCover(book)}
+Uma genealogia poética é uma constelação de obras
+que permite compreender os procedimentos formais,
+estéticos e intelectuais de um poeta.
 
-        <div class="lu-book-content">
-          <h3>
-            ${esc(book.author || "Autor não informado")}
-            —
-            <span>${esc(book.title || "Título não informado")}</span>
-          </h3>
+Ela NÃO é necessariamente uma genealogia de
+influências históricas comprovadas.
 
-          <span class="evidence">${esc(label)}</span>
+Responda em português brasileiro.
 
-          ${renderMetadata(book)}
+TAREFA
 
-          ${relatedWork ? `
-            <p>
-              <strong>Obra em diálogo:</strong>
-              ${esc(relatedWork)}
-            </p>
-          ` : ""}
+Receba o nome de um poeta e construa uma biblioteca
+de leitura comparada.
 
-          ${displayValue(book.connection) ? `
-            <p>${esc(book.connection)}</p>
-          ` : ""}
+ETAPA INTELECTUAL 1 — PERFIL POÉTICO
 
-          ${displayValue(book.reading_value) ? `
-            <p>
-              <strong>O que observar:</strong>
-              ${esc(book.reading_value)}
-            </p>
-          ` : ""}
+Antes de escolher livros, identifique:
 
-          ${renderBibliographicLink(book)}
-        </div>
-      </div>
-    </article>
-  `;
+- obras centrais do poeta;
+- procedimentos de linguagem;
+- formas de construção da imagem;
+- relações com objetos e cotidiano;
+- percepção, memória e espaço;
+- voz, ritmo, sintaxe e composição;
+- tradições poéticas relevantes;
+- tensões estéticas particulares.
+
+Não reduza o poeta a temas genéricos.
+
+ETAPA INTELECTUAL 2 — GENEALOGIA
+
+Selecione de 7 a 10 livros de OUTROS autores.
+
+Priorize livros de poesia, poéticas e obras
+literárias fundamentais para compreender
+a escrita do poeta pesquisado.
+
+Ensaios e teoria podem entrar apenas quando
+oferecerem uma conexão especialmente relevante.
+
+Cada livro deve responder à pergunta:
+
+"O que este livro permite perceber, com maior
+precisão, na obra do poeta pesquisado?"
+
+Valorize relações como:
+
+- objeto e linguagem;
+- cotidiano e estranhamento;
+- imagem e percepção;
+- silêncio e elipse;
+- materialidade da palavra;
+- fragmentação e montagem;
+- memória e tempo;
+- espaço e paisagem;
+- ritmo e sintaxe;
+- tradição e ruptura;
+- formas de atenção;
+- metapoesia;
+- voz e subjetividade.
+
+Esses são exemplos, não uma lista obrigatória.
+
+CRITÉRIOS DE QUALIDADE
+
+1. Evite recomendações genéricas.
+2. Prefira conexões entre obras específicas.
+3. Explique o PROCEDIMENTO POÉTICO compartilhado.
+4. Diferencie semelhanças e contrastes.
+5. Não escolha dez livros pelo mesmo motivo.
+6. Inclua autores brasileiros e estrangeiros
+   quando isso enriquecer a genealogia.
+7. Não invente títulos ou obras.
+8. Não invente versos, entrevistas ou citações.
+9. Não apresente afinidades como influências.
+10. Não inclua livros do próprio poeta pesquisado.
+11. Não confunda popularidade com relevância.
+12. Não afirme que o poeta leu um livro sem prova.
+13. Não invente fontes ou URLs.
+14. Evite repetir autores, salvo quando dois
+    livros oferecerem conexões muito distintas.
+
+ETAPA INTELECTUAL 3 — RELAÇÕES DOCUMENTADAS
+
+Produza separadamente a lista "documented".
+
+Ela é reservada a livros cuja preferência
+ou influência específica esteja documentada.
+
+Somente inclua um livro se houver uma fonte
+confiável, identificável e específica.
+
+Se não houver evidência suficiente, retorne [].
+
+Uma semelhança temática NÃO é evidência.
+Um catálogo bibliográfico NÃO é evidência.
+A simples menção conjunta NÃO é evidência.
+
+Não invente URLs.
+
+ATENÇÃO: a existência de uma URL mencionada
+pelo modelo não significa que ela foi verificada.
+
+FORMATO JSON OBRIGATÓRIO
+
+{
+  "poetic_profile": {
+    "central_works": [],
+    "formal_features": [],
+    "central_questions": [],
+    "traditions": []
+  },
+  "introduction": "",
+  "documented": [
+    {
+      "author": "",
+      "title": "",
+      "relationship": "preferência declarada",
+      "evidence_note": "",
+      "evidence_source_url": ""
+    }
+  ],
+  "connections": [
+    {
+      "author": "",
+      "title": "",
+      "related_work": "",
+      "connection": "",
+      "reading_value": "",
+      "genealogy_axis": "",
+      "evidence_type": "afinidade interpretativa"
+    }
+  ]
 }
 
-function renderReadingPath(connections) {
-  if (!connections.length) return "";
+ORIENTAÇÕES DE ESCRITA
 
-  return `
-    <section class="reading-path">
-      <p class="eyebrow">PERCURSO SUGERIDO</p>
-      <h3>Como percorrer estas leituras</h3>
+A introdução deve apresentar a poética do
+escritor em um parágrafo substantivo.
 
-      <ol class="lu-reading-list">
-        ${connections.map(book => `
-          <li>
-            <strong>${esc(book.title || "")}</strong>
-            <span> — ${esc(book.author || "")}</span>
-          </li>
-        `).join("")}
-      </ol>
-    </section>
-  `;
+Cada "connection" deve conter de 3 a 5 frases.
+
+Explique uma relação formal ou estética
+identificável, não apenas um tema comum.
+
+O campo "related_work" deve indicar uma obra
+real do poeta pesquisado.
+
+O campo "reading_value" deve orientar
+concretamente o leitor.
+
+O campo "genealogy_axis" deve nomear
+o eixo poético da conexão em poucas palavras.
+
+A lista "connections" deve conter
+preferencialmente 7 a 10 livros.
+
+Não escreva Markdown fora do JSON.
+`;
+
+/*
+ * GEMINI
+ *
+ * Uma única solicitação principal, com
+ * tentativas automáticas em erros transitórios.
+ */
+
+function isTransient(status, message = "") {
+  return (
+    [429, 500, 502, 503, 504, 529].includes(status) ||
+    /high demand|overload|temporar|unavailable|try again later/i
+      .test(message)
+  );
 }
 
-function renderSources(sources) {
-  const unique = new Map();
+async function callGemini(author, context) {
+  const apiKey = process.env.GEMINI_API_KEY;
 
-  for (const source of sources) {
-    const url = validUrl(source.url);
+  const model = clean(
+    process.env.GEMINI_MODEL ||
+    "gemini-2.5-flash",
+    100
+  );
 
-    if (!url || unique.has(url)) continue;
-
-    unique.set(url, {
-      title: source.title || "Fonte",
-      description: source.description || "",
-      url
-    });
-  }
-
-  const items = [...unique.values()];
-
-  if (!items.length) return "";
-
-  return `
-    <section class="sources">
-      <p class="eyebrow">RASTREABILIDADE</p>
-      <h3>Fontes e registros consultados</h3>
-
-      <ol class="source-list">
-        ${items.map(source => `
-          <li>
-            <strong>${esc(source.title)}</strong>
-
-            ${source.description ? `
-              — ${esc(source.description)}
-            ` : ""}
-
-            · <a href="${esc(source.url)}"
-                 target="_blank"
-                 rel="noopener noreferrer">
-                Acessar registro ↗
-              </a>
-          </li>
-        `).join("")}
-      </ol>
-    </section>
-  `;
-}
-
-function render(data) {
-  const documented = Array.isArray(data.reference_books)
-    ? data.reference_books.slice(0, 10)
-    : [];
-
-  const connections = Array.isArray(data.literary_connections)
-    ? data.literary_connections.slice(0, 10)
-    : [];
-
-  const sources = Array.isArray(data.sources)
-    ? data.sources
-    : [];
-
-  if (!documented.length && !connections.length) {
-    throw new Error(
-      "A pesquisa não retornou livros. Tente novamente com o nome completo do escritor."
+  if (!apiKey) {
+    throw Object.assign(
+      new Error("GEMINI_API_KEY não configurada."),
+      { status: 503 }
     );
   }
 
-  const author = data.author || "Escritor pesquisado";
+  const url =
+    GEMINI_ENDPOINT +
+    "/" +
+    encodeURIComponent(model) +
+    ":generateContent";
 
-  results.innerHTML = `
-    <div class="result-head">
-      <div>
-        <p class="eyebrow">LITERARY UNIVERSE / RESULTADOS</p>
+  const userPrompt = `
+POETA PESQUISADO: ${author}
 
-        <h2>${esc(author)}</h2>
+CONTEXTO BIOGRÁFICO AUXILIAR:
+${JSON.stringify(context).slice(0, 4500)}
 
-        <p>${esc(data.introduction || "")}</p>
-      </div>
+Construa uma genealogia poética de alta qualidade.
 
-      <button class="print-btn" id="print-btn">
-        ↓ SALVAR / IMPRIMIR PDF
-      </button>
-    </div>
+Primeiro caracterize a poética do escritor.
+Depois selecione os livros em função dessa poética.
 
-    <section class="lu-library-section"
-             aria-labelledby="lu-documented-heading">
+A seleção deve ter unidade intelectual,
+mas também diversidade de procedimentos.
 
-      <div class="lu-section-heading">
-        <p class="eyebrow">01 / BIBLIOTECA DE REFERÊNCIA</p>
+Não confunda uma genealogia interpretativa
+com uma relação histórica de influência.
+`;
 
-        <h2 id="lu-documented-heading">
-          Livros preferidos e influências documentadas
-        </h2>
+  const body = JSON.stringify({
+    systemInstruction: {
+      parts: [
+        { text: SYSTEM_PROMPT }
+      ]
+    },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: userPrompt }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      temperature: 0.45,
+      maxOutputTokens: 8000
+    }
+  });
 
-        <p>
-          Livros associados ao escritor por declarações
-          ou evidências documentais específicas.
-        </p>
-      </div>
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const result = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey
+        },
+        body,
+        signal: AbortSignal.timeout(22000)
+      });
 
-      ${documented.length ? `
-        <div class="book-list">
-          ${documented.map(renderDocumentedBook).join("")}
-        </div>
-      ` : `
-        <div class="lu-empty-state">
-          <h3>Nenhuma relação documental confirmada nesta pesquisa</h3>
+      const data = await result.json().catch(() => null);
 
-          <p>
-            Não foram encontradas evidências suficientes
-            para apresentar livros como preferências declaradas
-            ou influências documentadas deste escritor.
-            Isso não significa que tais relações não existam.
-          </p>
+      if (!result.ok) {
+        const message =
+          data?.error?.message ||
+          `Gemini HTTP ${result.status}`;
 
-          <p>
-            Explore abaixo as conexões literárias propostas
-            pela curadoria.
-          </p>
-        </div>
-      `}
-    </section>
+        if (
+          isTransient(result.status, message) &&
+          attempt < 3
+        ) {
+          console.warn(
+            `Gemini: tentativa ${attempt}/3 falhou: ${message}`
+          );
 
-    <section class="lu-library-section"
-             aria-labelledby="lu-connections-heading">
+          await sleep(attempt * 1200);
+          continue;
+        }
 
-      <div class="lu-section-heading">
-        <p class="eyebrow">02 / CONEXÕES LITERÁRIAS</p>
+        throw Object.assign(
+          new Error(message),
+          {
+            status: result.status,
+            transient: isTransient(
+              result.status,
+              message
+            )
+          }
+        );
+      }
 
-        <h2 id="lu-connections-heading">
-          Livros em diálogo com a obra
-        </h2>
+      const text = (
+        data?.candidates?.[0]?.content?.parts || []
+      )
+        .map(part => part.text || "")
+        .join("");
 
-        <p>
-          Aproximações entre temas, imagens, estilos,
-          procedimentos de escrita e tradições literárias.
-          Essas relações não devem ser interpretadas
-          automaticamente como influências comprovadas.
-        </p>
-      </div>
+      if (!text) {
+        throw new Error(
+          "O Gemini retornou uma resposta vazia."
+        );
+      }
 
-      ${connections.length ? `
-        <div class="book-list">
-          ${connections.map(renderConnection).join("")}
-        </div>
-      ` : `
-        <div class="lu-empty-state">
-          <p>
-            Não foram produzidas conexões literárias
-            nesta pesquisa.
-          </p>
-        </div>
-      `}
-    </section>
+      return JSON.parse(text);
 
-    ${renderReadingPath(connections)}
+    } catch (error) {
+      const timeout =
+        error.name === "TimeoutError" ||
+        error.name === "AbortError";
 
-    ${renderSources(sources)}
+      if (timeout && attempt < 3) {
+        await sleep(attempt * 1200);
+        continue;
+      }
 
-    <p class="disclaimer">
-      ${esc(
-        data.method_note ||
-        "As preferências documentadas e as conexões interpretativas são categorias distintas. Um registro bibliográfico comprova dados sobre um livro, não a existência de uma influência."
-      )}
-    </p>
-  `;
+      if (timeout) {
+        throw Object.assign(
+          new Error("Tempo limite do Gemini excedido."),
+          { transient: true }
+        );
+      }
 
-  results.classList.remove("hidden");
-
-  const printBtn = document.querySelector("#print-btn");
-
-  if (printBtn) {
-    printBtn.addEventListener("click", () => window.print());
+      throw error;
+    }
   }
 }
 
-form.addEventListener("submit", async event => {
-  event.preventDefault();
+/*
+ * METADADOS BIBLIOGRÁFICOS
+ *
+ * Os catálogos ajudam a localizar livros
+ * e capas. Não provam influência literária.
+ */
 
-  const author = authorInput.value.trim();
+function plausibleTitle(expected, found) {
+  const a = normalize(expected);
+  const b = normalize(found);
 
-  if (!author) return;
+  if (!a || !b) return false;
+  if (a === b) return true;
 
-  resultSection.classList.remove("hidden");
-  loading.classList.remove("hidden");
-  errorBox.classList.add("hidden");
-  results.classList.add("hidden");
+  const first = words(expected);
+  const second = new Set(words(found));
 
-  submitBtn.disabled = true;
-  submitBtn.textContent = "Pesquisando…";
+  if (first.length < 2) return false;
 
-  resultSection.scrollIntoView({
-    behavior: "smooth",
-    block: "start"
+  const matches = first.filter(
+    word => second.has(word)
+  ).length;
+
+  return (
+    matches / first.length >= 0.8 &&
+    Math.abs(a.length - b.length) < 35
+  );
+}
+
+function plausibleAuthor(expected, found) {
+  const a = words(expected);
+  const b = words(found);
+
+  if (!a.length || !b.length) return false;
+
+  return (
+    b.includes(a.at(-1)) &&
+    a.some(word => b.includes(word))
+  );
+}
+
+function emptyMetadata() {
+  return {
+    cover_url: null,
+    bibliographic_source_url: null,
+    first_publication_year: null,
+    publisher: null,
+    edition: null,
+    genre: null,
+    synopsis: null
+  };
+}
+
+async function bookMetadata(book) {
+  const empty = emptyMetadata();
+
+  const query = new URLSearchParams({
+    title: clean(book.title, 150),
+    author: clean(book.author, 120),
+    limit: "6"
   });
 
+  const googleQuery = encodeURIComponent(
+    "intitle:" + book.title +
+    " inauthor:" + book.author
+  );
+
+  const [openLibrary, googleBooks] =
+    await Promise.all([
+      getJson(
+        "https://openlibrary.org/search.json?" +
+        query.toString(),
+        4000
+      ),
+      getJson(
+        "https://www.googleapis.com/books/v1/volumes" +
+        "?q=" + googleQuery +
+        "&maxResults=6",
+        4000
+      )
+    ]);
+
+  const openMatch = (
+    openLibrary?.docs || []
+  ).find(item => {
+    return (
+      plausibleTitle(book.title, item.title) &&
+      (item.author_name || []).some(name =>
+        plausibleAuthor(book.author, name)
+      )
+    );
+  });
+
+  const googleMatch = (
+    googleBooks?.items || []
+  ).find(item => {
+    const info = item.volumeInfo || {};
+
+    return (
+      plausibleTitle(book.title, info.title) &&
+      (info.authors || []).some(name =>
+        plausibleAuthor(book.author, name)
+      )
+    );
+  });
+
+  if (!openMatch && !googleMatch) {
+    return empty;
+  }
+
+  const info = googleMatch?.volumeInfo || {};
+
+  const openCover = openMatch?.cover_i
+    ? "https://covers.openlibrary.org/b/id/" +
+      openMatch.cover_i +
+      "-M.jpg"
+    : null;
+
+  const googleCover = info.imageLinks?.thumbnail
+    ?.replace(/^http:/, "https:") || null;
+
+  const openUrl = openMatch?.key
+    ? "https://openlibrary.org" + openMatch.key
+    : null;
+
+  return {
+    cover_url:
+      openCover || googleCover || null,
+
+    bibliographic_source_url:
+      openUrl ||
+      validUrl(info.infoLink) ||
+      null,
+
+    first_publication_year:
+      openMatch?.first_publish_year ||
+      null,
+
+    publisher:
+      openMatch?.publisher?.[0] ||
+      info.publisher ||
+      null,
+
+    edition: null,
+
+    genre:
+      info.categories?.[0] ||
+      openMatch?.subject?.[0] ||
+      null,
+
+    synopsis:
+      typeof info.description === "string"
+        ? clean(info.description, 650)
+        : null
+  };
+}
+
+/*
+ * RELAÇÕES DOCUMENTADAS
+ *
+ * Nesta versão, não promovemos alegações
+ * geradas pelo modelo a fatos documentados.
+ *
+ * A lista documental deve ser alimentada
+ * futuramente por um acervo de fontes
+ * primárias verificadas.
+ */
+
+function verifiedDocumentedBooks() {
+  return [];
+}
+
+/*
+ * CURADORIA FINAL
+ */
+
+async function buildLibrary(author, raw) {
+  const candidates = Array.isArray(raw.connections)
+    ? raw.connections
+    : [];
+
+  const filtered = uniqueBooks(
+    candidates.filter(book => {
+      if (!book || !book.author || !book.title) {
+        return false;
+      }
+
+      if (sameWriter(book.author, author)) {
+        return false;
+      }
+
+      return clean(book.connection).length >= 70;
+    })
+  ).slice(0, MAX_CONNECTIONS);
+
+  const metadata = await Promise.all(
+    filtered.map(book => bookMetadata(book))
+  );
+
+  const connections = filtered.map((book, index) => {
+    const meta = metadata[index];
+
+    return {
+      author: clean(book.author, 150),
+      title: clean(book.title, 200),
+
+      role: "Genealogia poética",
+
+      related_work: clean(
+        book.related_work,
+        200
+      ),
+
+      genealogy_axis: clean(
+        book.genealogy_axis,
+        150
+      ),
+
+      connection: clean(
+        book.connection,
+        1600
+      ),
+
+      reading_value: clean(
+        book.reading_value,
+        700
+      ),
+
+      evidence_type:
+        "afinidade interpretativa",
+
+      evidence_note:
+        "Conexão de leitura comparada. " +
+        "Não constitui prova de influência.",
+
+      ...meta
+    };
+  });
+
+  const documented =
+    verifiedDocumentedBooks(author)
+      .slice(0, MAX_DOCUMENTED);
+
+  const sources = [];
+
+  for (const book of connections) {
+    if (book.bibliographic_source_url) {
+      sources.push({
+        title:
+          "Registro bibliográfico — " +
+          book.title,
+
+        url: book.bibliographic_source_url,
+
+        description:
+          "Identificação bibliográfica. " +
+          "Não comprova influência."
+      });
+    }
+  }
+
+  const uniqueSources = [
+    ...new Map(
+      sources.map(source => [
+        source.url,
+        source
+      ])
+    ).values()
+  ];
+
+  const profile = raw.poetic_profile || {};
+
+  const profileLines = [
+    ...(Array.isArray(profile.formal_features)
+      ? profile.formal_features
+      : []),
+
+    ...(Array.isArray(profile.central_questions)
+      ? profile.central_questions
+      : [])
+  ]
+    .map(item => clean(item, 160))
+    .filter(Boolean)
+    .slice(0, 8);
+
+  const readingPath = connections.map(
+    (book, index) =>
+      `${index + 1}. ${book.title} — ${book.author}.`
+  ).join("\n");
+
+  return {
+    version: VERSION,
+
+    author,
+
+    title:
+      "Genealogia poética — " + author,
+
+    introduction: clean(
+      raw.introduction,
+      1500
+    ),
+
+    poetic_profile: {
+      central_works:
+        Array.isArray(profile.central_works)
+          ? profile.central_works
+          : [],
+
+      formal_features:
+        Array.isArray(profile.formal_features)
+          ? profile.formal_features
+          : [],
+
+      central_questions:
+        Array.isArray(profile.central_questions)
+          ? profile.central_questions
+          : [],
+
+      traditions:
+        Array.isArray(profile.traditions)
+          ? profile.traditions
+          : []
+    },
+
+    poetic_axes: profileLines,
+
+    reference_books: documented,
+
+    literary_connections: connections,
+
+    // Compatibilidade com interfaces antigas.
+    books: connections,
+
+    reading_path: readingPath,
+
+    sources: uniqueSources,
+
+    method_note:
+      "Esta biblioteca propõe uma genealogia " +
+      "poética interpretativa, não uma cadeia " +
+      "de influências comprovadas. " +
+      "A lista de preferências e influências " +
+      "documentadas permanece vazia até que " +
+      "fontes específicas sejam verificadas. " +
+      "Os registros bibliográficos ajudam a " +
+      "identificar livros e capas, mas não " +
+      "demonstram relações literárias. " +
+      "As datas, editoras e capas podem " +
+      "corresponder a registros de edições " +
+      "diferentes e devem ser conferidas."
+  };
+}
+
+/*
+ * NETLIFY HANDLER
+ */
+
+export default async function handler(req) {
+  if (req.method !== "POST") {
+    return response(
+      { error: "Use POST." },
+      405
+    );
+  }
+
+  let input;
+
   try {
-    const response = await fetch("/.netlify/functions/library", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ author })
-    });
+    input = await req.json();
+  } catch {
+    return response(
+      { error: "Pedido inválido." },
+      400
+    );
+  }
 
-    const payload = await response.json();
+  const author = clean(input?.author, 120);
 
-    if (!response.ok) {
-      throw new Error(
-        payload.error || "Não foi possível concluir a pesquisa."
+  if (!author) {
+    return response(
+      { error: "Informe o nome de um poeta." },
+      400
+    );
+  }
+
+  try {
+    console.log(
+      `Literary Universe ${VERSION}: ${author}`
+    );
+
+    const context =
+      await getPoetContext(author);
+
+    const raw =
+      await callGemini(author, context);
+
+    const library =
+      await buildLibrary(author, raw);
+
+    if (!library.literary_connections.length) {
+      return response(
+        {
+          error:
+            "Não foi possível construir uma " +
+            "genealogia poética consistente. " +
+            "Confira o nome do poeta e tente novamente."
+        },
+        422
       );
     }
 
-    render(payload);
+    return response(library);
 
-  } catch (err) {
-    showError(
-      err.message ||
-      "Ocorreu um erro inesperado. Tente novamente."
+  } catch (error) {
+    console.error(
+      `Literary Universe ${VERSION}:`,
+      error.message
     );
 
-  } finally {
-    loading.classList.add("hidden");
-    submitBtn.disabled = false;
-    submitBtn.innerHTML = 'Construir biblioteca <span>→</span>';
+    if (error.transient) {
+      return response(
+        {
+          error:
+            "O Gemini está temporariamente " +
+            "sobrecarregado. Aguarde alguns " +
+            "minutos e tente novamente."
+        },
+        503
+      );
+    }
+
+    if (error.status === 429) {
+      return response(
+        {
+          error:
+            "Limite de solicitações do Gemini " +
+            "atingido. Tente novamente mais tarde."
+        },
+        429
+      );
+    }
+
+    if (
+      error.status === 400 ||
+      error.status === 404
+    ) {
+      return response(
+        {
+          error:
+            "O modelo Gemini configurado não " +
+            "está disponível. Verifique GEMINI_MODEL."
+        },
+        502
+      );
+    }
+
+    if (
+      error.status === 401 ||
+      error.status === 403
+    ) {
+      return response(
+        {
+          error:
+            "Falha de autenticação na API Gemini."
+        },
+        502
+      );
+    }
+
+    return response(
+      {
+        error:
+          "Falha na pesquisa. Consulte o log " +
+          "da função library na Netlify."
+      },
+      503
+    );
   }
-});
+}
