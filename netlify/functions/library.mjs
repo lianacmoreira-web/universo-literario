@@ -1,5 +1,4 @@
-
-// Literary Universe — Reference Library 2.4
+// Literary Universe — Reference Library 2.5
 // Netlify Function. No extra packages or paid search API.
 const NEXO = 'https://www.nexojornal.com.br/estante-favoritos/2016/08/13/os-5-livros-favoritos-do-economista-eduardo-giannetti';
 const tidy = (v, n=2000) => String(v ?? '').trim().slice(0,n);
@@ -52,10 +51,31 @@ async function context(author){
  }
  return docs.filter(d=>d.url).slice(0,20);
 }
-function documentaryMentions(docs,author,other){
- const surname=words(other).at(-1);
- if(!surname || surname.length<4)return [];
- return docs.filter(d=>d.kind==='estudo_academico' && norm(d.title+' '+d.excerpt).includes(norm(author)) && words(d.title+' '+d.excerpt).includes(surname)).slice(0,2);
+// Documentary evidence is limited to text actually returned by OpenAlex.
+// A co-mention is not proof of influence or of a relationship with a title.
+function documentaryEvidence(docs, researched, candidate, bookTitle){
+ const fullName=norm(candidate);
+ const surname=words(candidate).at(-1);
+ const title=norm(bookTitle);
+ const results=[];
+ if(!surname || surname.length<4)return results;
+ for(const d of docs){
+  if(d.kind!=='estudo_academico' || !d.excerpt)continue;
+  const abstract=norm(d.excerpt);
+  if(!abstract.includes(norm(researched)))continue;
+  const exactName=fullName.length>6 && abstract.includes(fullName);
+  const surnameOnly=new RegExp(`(^| )${surname}( |$)`).test(abstract);
+  if(!exactName && !surnameOnly)continue;
+  const titleFound=title.length>8 && abstract.includes(title);
+  // A small, auditable extract. Do not fabricate quotations.
+  const original=d.excerpt;
+  const match=original.match(new RegExp(exactName ? fullName.split(' ').join('\\s+') : surname,'i'));
+  // Accents and punctuation may prevent the original-text match.
+  const position=match?.index ?? 0;
+  const excerpt=original.slice(Math.max(0,position-150),Math.min(original.length,position+280)).trim();
+  results.push({url:d.url,title:d.title,excerpt,scope:titleFound?'menção ao título e ao autor no resumo':'menção ao autor no resumo',title_found:titleFound});
+ }
+ return results.slice(0,2);
 }
 
 const INSTRUCTION=`Você é um curador bibliográfico acadêmico. Responda SOMENTE JSON válido, em português brasileiro.
@@ -117,15 +137,43 @@ async function curate(raw,author,docs){
   const connection=tidy(b.connection,2000),reading=tidy(b.reading_value,850);
   if(connection.length<150||reading.length<35)continue;
   seen.add(id);
-  const mentions=documentaryMentions(docs,author,b.author);
-  books.push({author:tidy(b.author,150),title:tidy(b.title,200),role:tidy(b.role,160)||'Leitura comparada',related_work:tidy(b.related_work,160),connection,reading_value:reading,evidence_type:['afinidade crítica','contexto literário'].includes(b.evidence_type)?b.evidence_type:'afinidade crítica',author_evidence:mentions.length?'Um resumo acadêmico recuperado menciona ambos os escritores; isso não comprova leitura, preferência ou influência.':'Não foi identificada evidência primária de preferência ou influência.',book_evidence:`Registro bibliográfico localizado em ${v.catalog}.`,evidence_note:mentions.length?'Há menção conjunta em resumo acadêmico, mas a relação com este livro específico permanece hipótese curatorial.':'A identificação do livro foi conferida em catálogo. A conexão é hipótese curatorial, não relação documentada.',source_url:v.url});
-  sources.push({title:`Registro bibliográfico — ${tidy(b.title,150)}`,url:v.url,description:`${v.catalog}: identifica o livro; não comprova relação com ${author}.`});
-  for(const m of mentions)if(!sources.some(x=>x.url===m.url))sources.push({title:`Estudo acadêmico — ${tidy(m.title,160)}`,url:m.url,description:'Resumo recuperado menciona os dois escritores; a natureza da relação e a associação ao título recomendado não foram verificadas.'});
-  if(books.length===6)break;
+  const evidence=documentaryEvidence(docs,author,b.author,b.title);
+  const titleEvidence=evidence.find(x=>x.title_found);
+  const authorEvidence=evidence[0];
+  // A title appearing in an abstract is still not proof of influence.
+  // Preserve the exploratory category until the nature of the link is reviewed.
+  books.push({
+    author:tidy(b.author,150),title:tidy(b.title,200),
+    role:tidy(b.role,160)||'Leitura comparada',
+    related_work:tidy(b.related_work,160),connection,reading_value:reading,
+    evidence_type:['afinidade crítica','contexto literário'].includes(b.evidence_type)?b.evidence_type:'afinidade crítica',
+    author_evidence:authorEvidence
+      ?`Menção documental localizada no resumo de “${authorEvidence.title}”. Isso não comprova preferência ou influência.`
+      :'Não foi localizada menção documental verificável ao autor recomendado nos resumos recuperados.',
+    book_evidence:titleEvidence
+      ?`O resumo também menciona o título recomendado. A natureza da relação exige leitura do estudo; registro bibliográfico confirmado em ${v.catalog}.`
+      :`A existência do livro foi conferida em ${v.catalog}; os resumos recuperados não documentam relação com este título específico.`,
+    evidence_note:authorEvidence
+      ?`${authorEvidence.scope}. O trecho e a fonte estão identificados separadamente; não se afirma influência.`
+      :'Conexão interpretativa sem evidência documental específica recuperada.',
+    source_url:v.url, // Compatibility with the existing site: catalog link.
+    bibliographic_source_url:v.url,
+    evidence_source_url:authorEvidence?.url||null,
+    evidence_excerpt:authorEvidence?.excerpt||null,
+    evidence_scope:authorEvidence?.scope||'sem evidência documental da relação'
+   });
+   sources.push({title:`Registro bibliográfico — ${tidy(b.title,150)}`,url:v.url,description:`${v.catalog}: confirma a identificação bibliográfica; não demonstra relação com ${author}.`});
+   for(const e of evidence){
+    if(!sources.some(x=>x.url===e.url))sources.push({
+     title:`Estudo acadêmico — ${tidy(e.title,160)}`,url:e.url,
+     description:`${e.scope}. Trecho recuperado: “${tidy(e.excerpt,320)}”. A interpretação da relação requer consulta ao estudo.`
+    });
+   }
+   if(books.length===6)break;
  }
  // Rebuild the reading path ONLY from books that survived validation.
  const reading_path=books.map((b,i)=>`${i+1}. ${b.title} — ${b.role}.`).join('\n');
- return {author,title:`Biblioteca exploratória — ${author}`,introduction:tidy(raw?.introduction,1300)+ '\n\nAs relações abaixo são hipóteses de leitura comparada; não foram comprovadas como preferências ou influências do escritor.',books,reading_path,sources,method_note:`Biblioteca exploratória produzida com auxílio de IA. Os livros foram conferidos em Open Library ou Google Books. Resumos de estudos recuperados via OpenAlex podem documentar menções conjuntas, mas não provam preferência, leitura, influência nem relação com o título recomendado. As fontes devem ser abertas e avaliadas pelo leitor. O link de cada ficha conduz ao registro bibliográfico, NÃO à prova da relação. A lista e o percurso incluem somente livros validados.`,context_sources:docs.filter(d=>d.kind==='contexto'||d.kind==='estudo_academico').map(d=>({title:d.title,url:d.url,description:'Fonte de contexto, não evidência da relação com os livros sugeridos.'})).slice(0,6)};
+ return {author,title:`Biblioteca exploratória — ${author}`,introduction:tidy(raw?.introduction,1300)+ '\n\nAs recomendações são hipóteses de leitura comparada. Menções documentais, quando disponíveis, são descritas separadamente e não comprovam, por si só, preferências ou influências.',books,reading_path,sources,method_note:`Biblioteca exploratória produzida com auxílio de IA. Os livros foram conferidos em Open Library ou Google Books. Resumos recuperados via OpenAlex são examinados para localizar menções textuais ao autor recomendado e, separadamente, ao título. Uma menção não comprova leitura, preferência, influência ou relação crítica. Quando há trecho disponível, ele é identificado na ficha e na lista de fontes. As fontes devem ser abertas e avaliadas pelo leitor. O link de cada ficha conduz ao registro bibliográfico, NÃO à prova da relação. A lista e o percurso incluem somente livros validados.`,context_sources:docs.filter(d=>d.kind==='contexto'||d.kind==='estudo_academico').map(d=>({title:d.title,url:d.url,description:'Fonte de contexto, não evidência da relação com os livros sugeridos.'})).slice(0,6)};
 }
 export default async function handler(req){
  if(req.method!=='POST')return json({error:'Use POST.'},405);
@@ -140,7 +188,7 @@ export default async function handler(req){
   if(!result.books.length)return json({error:'O Gemini respondeu, mas nenhum livro passou pela conferência bibliográfica. Não apresentaremos títulos incertos.'},422);
   return json(result);
  }catch(e){
-  console.error('Literary Universe 2.4:',e.message);
+  console.error('Literary Universe 2.5:',e.message);
   if(e.status===429)return json({error:'Limite de uso do Gemini atingido. Tente novamente mais tarde.'},429);
   if(e.status===503||e.status===502)return json({error:'O serviço Gemini está temporariamente indisponível. Consulte os logs da função library.'},503);
   if(e.status===400||e.status===404)return json({error:'Modelo Gemini não aceito pela API. Confira GEMINI_MODEL.'},502);
